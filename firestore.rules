@@ -1,0 +1,90 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // `.get(field, default)` instead of dot-access everywhere below: the Firestore rules
+    // engine can evaluate a `list`-query's rule against a resource that doesn't have every
+    // field populated yet (e.g. mid-query planning), and dot-access throws in that case
+    // ("Property X is undefined on object") instead of just being falsy.
+    function isOwnerOfList(listId) {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/lists/$(listId)).data.get('ownerId', null) == request.auth.uid;
+    }
+
+    function listIsShared(listId) {
+      return get(/databases/$(database)/documents/lists/$(listId)).data.get('visibility', null) == 'unlisted';
+    }
+
+    // No Cloud Functions on the Spark plan, so there's no trusted server to keep a redacted
+    // claim-count aggregate in sync on the owner's behalf. Instead, the claimer's own browser
+    // updates the item's quantityClaimed in the same transaction as writing the claim doc — this
+    // rule is what keeps that update powerless to touch anything else (name, price, claims of
+    // other people, ...). See lib/firestore.ts's addClaim/removeClaim.
+    function isClaimCountUpdateByGuest(listId) {
+      return listIsShared(listId) && isSignedIn() &&
+        request.auth.uid != get(/databases/$(database)/documents/lists/$(listId)).data.get('ownerId', null) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantityClaimed', 'isFullyClaimed', 'updatedAt']) &&
+        request.resource.data.quantityClaimed is number && request.resource.data.quantityClaimed >= 0 &&
+        request.resource.data.isFullyClaimed is bool;
+    }
+
+    // ---------- users ----------
+    // Profiles are private to their owner; nothing here is needed to render public share pages
+    // (list docs carry a denormalized ownerDisplayName instead), so there's no reason to expose them.
+    match /users/{uid} {
+      allow read, update: if isSignedIn() && request.auth.uid == uid;
+      allow create: if isSignedIn() && request.auth.uid == uid;
+      allow delete: if false;
+    }
+
+    // ---------- lists ----------
+    match /lists/{listId} {
+      allow read: if resource.data.get('visibility', null) == 'unlisted' ||
+        (isSignedIn() && request.auth.uid == resource.data.get('ownerId', null));
+      // Anonymous (guest) sessions exist only to let people claim gifts, never to own lists.
+      allow create: if isSignedIn() &&
+        request.auth.token.firebase.sign_in_provider != 'anonymous' &&
+        request.resource.data.ownerId == request.auth.uid;
+      allow update: if isSignedIn() && request.auth.uid == resource.data.get('ownerId', null) &&
+        request.resource.data.ownerId == resource.data.get('ownerId', null);
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.get('ownerId', null);
+
+      // ---------- sections ----------
+      match /sections/{sectionId} {
+        allow read: if listIsShared(listId) || isOwnerOfList(listId);
+        allow write: if isOwnerOfList(listId);
+      }
+
+      // ---------- items ----------
+      match /items/{itemId} {
+        allow read: if listIsShared(listId) || isOwnerOfList(listId);
+        allow create, delete: if isOwnerOfList(listId);
+        allow update: if isOwnerOfList(listId) || isClaimCountUpdateByGuest(listId);
+
+        // ---------- claims ----------
+        // Deliberately unreadable by the list owner: this is what keeps "who's buying what"
+        // a surprise. Other guests CAN read them, so people don't duplicate-buy a gift.
+        match /claims/{claimId} {
+          allow read: if isSignedIn() && listIsShared(listId) &&
+            request.auth.uid != get(/databases/$(database)/documents/lists/$(listId)).data.get('ownerId', null);
+          allow create: if isSignedIn() && listIsShared(listId) &&
+            request.auth.uid != get(/databases/$(database)/documents/lists/$(listId)).data.get('ownerId', null) &&
+            request.resource.data.claimerUid == request.auth.uid &&
+            request.resource.data.quantity is number &&
+            request.resource.data.quantity > 0 &&
+            request.resource.data.claimerName is string &&
+            request.resource.data.claimerName.size() > 0 &&
+            request.resource.data.claimerName.size() < 100;
+          // Immutable by design — to change a claim, cancel it and claim again.
+          allow update: if false;
+          allow delete: if isSignedIn() && resource.data.get('claimerUid', null) == request.auth.uid;
+        }
+      }
+    }
+  }
+}

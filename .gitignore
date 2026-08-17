@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+web/dist/
+functions/lib/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+ui-debug.log
+*.local
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/
+
+# Logs
+npm-debug.log*
