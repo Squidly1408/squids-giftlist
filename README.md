@@ -1,3 +1,5 @@
+![Squids-GiftList Banner](./.github/banner.png)
+
 # Squids-GiftList
 
 A gift-list web app: create an account, build gift lists for any occasion (Christmas, birthdays,
